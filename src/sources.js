@@ -69,14 +69,40 @@ export function parseReleaseMetadata(filename) {
   const tokens = lower.split(/[\s._\-[\]()]+/).filter(Boolean);
   const tokenSet = new Set(tokens);
 
-  // Extract release group (typically after the last `-`, e.g., `-FLUX`, `-NTb`, `-MeGusta`)
+  // Extract release group:
+  // 1. Standard scene/P2P hyphenated suffix (e.g., `-FLUX`, `-NTb`, `-MeGusta`, `- YIFY`)
+  // 2. Or trailing token after codec/format when separated by space/dot or inside parentheses
+  //    (e.g., `Hocus.Pocus.1993.1080p.BrRip.x264.YIFY`, `(1080p AMZN WEB-DL x265 Silence)`)
+  const NON_GROUP_TOKENS = new Set([
+    "dl", "rip", "web", "webdl", "webrip", "bluray", "bdrip", "brrip", "remux", "hdtv", "dvdrip",
+    "264", "265", "x264", "x265", "h264", "h265", "hevc", "avc", "xvid", "divx", "av1",
+    "aac", "ac3", "ddp5", "dd5", "dts", "atmos", "truehd", "flac", "mp3", "opus",
+    "1080p", "720p", "2160p", "480p", "4k", "uhd", "hdr", "hdr10", "dv", "10bit", "8bit",
+    "proper", "repack", "extended", "unrated", "directors", "cut", "remastered", "multi", "dual",
+    "eng", "en", "heb", "he", "hi", "sdh", "sub", "subs", "srt",
+  ]);
+
   let releaseGroup = null;
-  const groupMatch = withoutExt.match(/-([A-Za-z0-9]+)$/);
+  const cleanedForGroup = withoutExt.replace(/[)\]]+$/, "").trim();
+  const groupMatch = cleanedForGroup.match(/-\s*([A-Za-z0-9]+)$/);
   if (groupMatch) {
     const candidate = groupMatch[1].toLowerCase();
-    // Avoid mistaking "DL" in "WEB-DL" or "264" in "H-264" for a release group
-    if (!["dl", "rip", "264", "265", "hevc", "avc", "aac", "ddp5", "atmos"].includes(candidate)) {
+    if (!NON_GROUP_TOKENS.has(candidate)) {
       releaseGroup = candidate;
+    }
+  } else if (tokens.length >= 4) {
+    // Check if the filename has technical rip/codec/resolution tokens and ends with a release group token (like `.x264.YIFY` or `x265 Silence`)
+    const hasTechToken = tokens.some((t) =>
+      ["1080p", "720p", "2160p", "480p", "x264", "x265", "h264", "h265", "hevc", "xvid", "bluray", "brrip", "bdrip", "webrip", "webdl", "hdtv", "dvdrip"].includes(t)
+    );
+    const lastToken = tokens[tokens.length - 1];
+    if (
+      hasTechToken &&
+      lastToken.length >= 2 &&
+      !/^\d+$/.test(lastToken) &&
+      !NON_GROUP_TOKENS.has(lastToken)
+    ) {
+      releaseGroup = lastToken;
     }
   }
 

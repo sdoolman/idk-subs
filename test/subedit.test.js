@@ -44,8 +44,6 @@ describe("SubtitleEdit (libse) Pre-Processing Port", () => {
 
 describe("SubtitleEdit (libse) Hebrew AutoBreakLine & RTL Punctuation Port", () => {
   it("keeps Hebrew lines <= 42 chars on a single line", () => {
-    const heb = "אני לא חושב שאנחנו צריכים להיכנס לשם עכשיו.";
-    // 43 chars -> breaks; 35 chars -> stays 1 line
     const shortHeb = "אני לא חושב שאנחנו צריכים להיכנס.";
     assert.equal(autoBreakHebrewLine(shortHeb, 42).includes("\n"), false);
   });
@@ -55,7 +53,6 @@ describe("SubtitleEdit (libse) Hebrew AutoBreakLine & RTL Punctuation Port", () 
     const broken = autoBreakHebrewLine(heb, 42);
     const lines = broken.split("\n");
     assert.equal(lines.length, 2);
-    // Should break right after the comma before "אבל"!
     assert.equal(lines[0], "אמרתי לך כבר אלף פעמים,");
     assert.equal(lines[1], "אבל אתה פשוט מסרב להקשיב לכל מה שאני אומר.");
   });
@@ -120,5 +117,19 @@ describe("Strict Exact-Sync Gate", () => {
       SubHearingImpaired: "0",
     };
     assert.equal(scoreSubtitleSync(commentCand, dexterContext) >= 500, true);
+
+    // Dot/space-separated release group without hyphen (e.g. `.x264.YIFY` or `(1080p AMZN WEB-DL x265 Silence)`)
+    const yifyCand = {
+      IDSubtitleFile: "1954550756",
+      MovieReleaseName: "Hocus.Pocus.1993.720p.BrRip.x264.YIFY",
+      SubFileName: "Hocus.Pocus.1993.720p.BrRip.x264.YIFY.srt",
+      InfoReleaseGroup: "YIFY",
+      SubHearingImpaired: "0",
+    };
+    const yifyScore = scoreSubtitleSync(yifyCand, {
+      videoHash: null,
+      filename: "Hocus.Pocus.1993.1080p.BrRip.x264.YIFY.mp4",
+    });
+    assert.ok(yifyScore >= 350, `Expected dot-separated YIFY release group match >= 350, got ${yifyScore}`);
   });
 });
