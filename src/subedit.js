@@ -321,7 +321,7 @@ function isHiDescription(text) {
     clean.endsWith(" on radio") ||
     clean.endsWith(" over intercom") ||
     clean.endsWith(" shatters") ||
-    clean.endsWith("ing")
+    (clean.endsWith("ing") && !/[.?!]/.test(clean) && clean.split(/\s+/).length <= 3)
   );
 }
 
@@ -333,6 +333,7 @@ function findMatchingEndTag(text, start, startTag, endTag) {
   if (startTag === endTag) {
     return text.indexOf(endTag, start + startTag.length);
   }
+  const baseEndTag = endTag.endsWith(":") && endTag.length > 1 ? endTag.slice(0, -1) : endTag;
   let depth = 1;
   let i = start + startTag.length;
   while (i < text.length) {
@@ -341,10 +342,15 @@ function findMatchingEndTag(text, start, startTag, endTag) {
       i += startTag.length;
       continue;
     }
-    if (text.startsWith(endTag, i)) {
+    if (text.startsWith(baseEndTag, i)) {
       depth--;
-      if (depth === 0) return i;
-      i += endTag.length;
+      if (depth === 0) {
+        if (endTag.endsWith(":") && !text.startsWith(endTag, i)) {
+          return -1;
+        }
+        return i;
+      }
+      i += baseEndTag.length;
       continue;
     }
     i++;
@@ -753,16 +759,16 @@ function getHebrewBreakCost(text, spaceIndex) {
       /\d/.test(l1Trimmed[l1Trimmed.length - 2]) &&
       /^\d/.test(l2);
     if (!isDecimal) {
-      bonus -= 100; // `BreakAfterSentenceEndBonus`
+      bonus -= 160; // `BreakAfterSentenceEndBonus`
     }
   } else if (",;:—–".includes(lastChar)) {
-    bonus -= 55; // `BreakAfterCommaBonus`
+    bonus -= 110; // `BreakAfterCommaBonus`
   }
 
   // Hebrew syntactic bonus: breaking right BEFORE a Hebrew conjunction/subordinator (`אבל`, `כי`, `אם`, `ש...`, `ו...`)
   const firstWordInL2 = l2.split(" ")[0].replace(/^["'״׳]+/, "");
   if (HEBREW_BREAK_BEFORE_WORDS.has(firstWordInL2)) {
-    bonus -= 35;
+    bonus -= 75;
   } else if (firstWordInL2.length >= 3 && /^[וש]/.test(firstWordInL2)) {
     // Words starting with ש... (that/which) or ו... (and) are natural clause boundaries in Hebrew
     bonus -= 15;
