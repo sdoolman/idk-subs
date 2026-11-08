@@ -1,13 +1,17 @@
 /**
- * Source English Subtitle Discovery & Strict Exact-Sync Gate
+ * Source English Subtitle Discovery & Distinct Release Family Selection
  *
- * Enforces the user's strict zero-token-waste policy:
- * - We ONLY proceed if we can verify the English subtitle is synced to the exact video stream
- *   playing in Stremio (either via exact OpenSubtitles 64-bit `videoHash` byte-match OR
- *   exact release group / rip format match against Stremio's `filename`).
- * - If Stremio does not provide `videoHash`/`filename` or no English subtitle matches the exact
- *   release sync, we return `null` immediately (which causes the addon to return `{ subtitles: [] }`,
- *   just like Wizdom when no subtitle exists, burning 0 AI tokens).
+ * Architectural Policy:
+ * 1. Listing subtitle options in `/subtitles/:type/:id/:extra.json` costs 0 AI tokens because
+ *    we NEVER pre-warm or translate in the background when a user merely opens a video stream!
+ *    AI translation ONLY runs when the user explicitly selects one of our tracks (`/ai-sub/:token.srt`).
+ * 2. Exact Sync Priority + Distinct Release Families (Up to 3 Options):
+ *    - If an English subtitle matches the playing stream's exact `videoHash` or exact release/group
+ *      (`YIFY` == `YTS`, `-MeGusta` in `SubAuthorComment`, `-FLUX`, etc.), it is placed #1 (`★ Exact Sync`).
+ *    - Up to 2 additional *genuinely distinct* timing/release families (e.g., a `BluRay` master vs.
+ *      a `WEB-DL` master vs. a different OpenSubtitles timing group `SubTSGroup`) are also returned
+ *      with clear release labels so the user is never left without an option when torrent filenames
+ *      are non-standard (and can pick or manually offset the closest master in Stremio).
  */
 
 const DEFAULT_USER_AGENT = "trailerrs";
@@ -15,24 +19,6 @@ const DEFAULT_OS_REST_BASE = "https://rest.opensubtitles.org";
 const DEFAULT_OS_STREMIO_BASE = "https://opensubtitles-v3.strem.io";
 const DEFAULT_OS_UTF8_DL_BASE =
   "https://subs5.strem.io/en/download/subencoding-stremio-utf8/src-api/file";
-
-/**
- * Common video rip / source format tokens used in scene & P2P releases.
- */
-const FORMAT_TOKENS = [
-  "bluray",
-  "bdrip",
-  "brrip",
-  "remux",
-  "web-dl",
-  "webdl",
-  "webrip",
-  "webr",
-  "hdtv",
-  "hdrip",
-  "dvdrip",
-  "hddvd",
-];
 
 /**
  * Streaming service / network tags that have distinct intro timings (e.g., Netflix vs. Amazon vs. Apple TV+).
@@ -55,31 +41,50 @@ const SERVICE_TOKENS = [
 ];
 
 /**
+ * Equivalent release group aliases (e.g., YIFY rebranded to YTS / YTS.MX / YTS.LT / YTS.AM).
+ */
+const RELEASE_GROUP_ALIASES = {
+  yify: "yify",
+  yts: "yify",
+  "yts.mx": "yify",
+  "yts.lt": "yify",
+  "yts.am": "yify",
+  "yts.ag": "yify",
+};
+
+function canonicalizeGroup(group) {
+  if (!group) return null;
+  const lower = group.toLowerCase().trim();
+  return RELEASE_GROUP_ALIASES[lower] || lower;
+}
+
+/**
  * Normalize a filename/release string into lowercase tokens and extract release group & format metadata.
  */
 export function parseReleaseMetadata(filename) {
   if (!filename) return null;
 
+  // Strip known tracker watermarks (like [EZTVx.to], [TGx], [rartv], [ettv], [YTS.MX])
+  // WITHOUT wiping out QxR/Tigole style release brackets like `[1080p BluRay x265 Tigole]`!
   const withoutExt = filename
     .replace(/\.(mkv|mp4|avi|mov|webm|srt|sub|ass|vtt)$/i, "")
-    .replace(/\[[^\]]*\]/g, "") // Strip tracker tags like [EZTVx.to], [TGx], [rartv], [ettv]
+    .replace(
+      /\[(?:eztv[^\]]*|tgx|rartv|ettv|torrentgalaxy[^\]]*|yts\.[a-z]+|www\.[^\]]+)\]/gi,
+      (match) => (/yts/i.test(match) ? "-YTS" : "")
+    )
     .trim();
 
   const lower = withoutExt.toLowerCase();
   const tokens = lower.split(/[\s._\-[\]()]+/).filter(Boolean);
   const tokenSet = new Set(tokens);
 
-  // Extract release group:
-  // 1. Standard scene/P2P hyphenated suffix (e.g., `-FLUX`, `-NTb`, `-MeGusta`, `- YIFY`)
-  // 2. Or trailing token after codec/format when separated by space/dot or inside parentheses
-  //    (e.g., `Hocus.Pocus.1993.1080p.BrRip.x264.YIFY`, `(1080p AMZN WEB-DL x265 Silence)`)
   const NON_GROUP_TOKENS = new Set([
-    "dl", "rip", "web", "webdl", "webrip", "bluray", "bdrip", "brrip", "remux", "hdtv", "dvdrip",
+    "dl", "rip", "web", "webdl", "webrip", "bluray", "bdrip", "brrip", "remux", "hdtv", "dvdrip", "dvd",
     "264", "265", "x264", "x265", "h264", "h265", "hevc", "avc", "xvid", "divx", "av1",
     "aac", "ac3", "ddp5", "dd5", "dts", "atmos", "truehd", "flac", "mp3", "opus",
     "1080p", "720p", "2160p", "480p", "4k", "uhd", "hdr", "hdr10", "dv", "10bit", "8bit",
     "proper", "repack", "extended", "unrated", "directors", "cut", "remastered", "multi", "dual",
-    "eng", "en", "heb", "he", "hi", "sdh", "sub", "subs", "srt",
+    "eng", "en", "heb", "he", "hi", "sdh", "sub", "subs", "srt", "1", "5", "7", "2", "0",
   ]);
 
   let releaseGroup = null;
@@ -88,12 +93,14 @@ export function parseReleaseMetadata(filename) {
   if (groupMatch) {
     const candidate = groupMatch[1].toLowerCase();
     if (!NON_GROUP_TOKENS.has(candidate)) {
-      releaseGroup = candidate;
+      releaseGroup = canonicalizeGroup(candidate);
     }
   } else if (tokens.length >= 4) {
-    // Check if the filename has technical rip/codec/resolution tokens and ends with a release group token (like `.x264.YIFY` or `x265 Silence`)
     const hasTechToken = tokens.some((t) =>
-      ["1080p", "720p", "2160p", "480p", "x264", "x265", "h264", "h265", "hevc", "xvid", "bluray", "brrip", "bdrip", "webrip", "webdl", "hdtv", "dvdrip"].includes(t)
+      [
+        "1080p", "720p", "2160p", "480p", "x264", "x265", "h264", "h265",
+        "hevc", "xvid", "bluray", "brrip", "bdrip", "webrip", "webdl", "hdtv", "dvdrip",
+      ].includes(t)
     );
     const lastToken = tokens[tokens.length - 1];
     if (
@@ -102,8 +109,12 @@ export function parseReleaseMetadata(filename) {
       !/^\d+$/.test(lastToken) &&
       !NON_GROUP_TOKENS.has(lastToken)
     ) {
-      releaseGroup = lastToken;
+      releaseGroup = canonicalizeGroup(lastToken);
     }
+  }
+
+  if (!releaseGroup && (tokenSet.has("yify") || tokenSet.has("yts"))) {
+    releaseGroup = "yify";
   }
 
   // Canonicalize rip format class (web vs bluray vs hdtv vs dvd)
@@ -141,19 +152,23 @@ export function parseReleaseMetadata(filename) {
  * Strict sync verification between the user's playing video (`videoHash`, `videoSize`, `filename`)
  * and a candidate English subtitle from OpenSubtitles.
  *
- * Returns a positive score (`>= 100`) ONLY if the subtitle is guaranteed to be in sync:
+ * Returns a positive score (`>= 200`) ONLY if the subtitle is verified to match the playing stream:
  * - Score 1000+: Matched by OpenSubtitles `moviehash` (exact 64-bit byte hash of the video file!)
- * - Score 500+: Exact normalized filename stem match
- * - Score 300+: Exact release group match (e.g., `-FLUX`, `-NTb`, `-SPARKS`) + compatible format class
- * - Score 200+: Exact streaming service (`AMZN`, `NF`, `ATVP`, `DSNP`) + `WEB` format match
- * - Score 0: Rejected (potential out-of-sync timing -> do NOT translate or spend tokens)
+ * - Score 500+: Exact normalized filename stem match (or explicitly listed in `SubAuthorComment`)
+ * - Score 350+: Exact release group match (e.g., `-FLUX`, `-NTb`, `-MeGusta`, `YIFY`/`YTS`)
+ * - Score 220+: Exact streaming service (`AMZN`, `NF`, `ATVP`, `DSNP`) + `WEB` format match
+ * - Score 0: Not an exact sync match for the current filename/hash.
  */
 export function scoreSubtitleSync(candidate, videoContext) {
+  if (candidate.SubAutoTranslation === "1" || candidate.SubForeignPartsOnly === "1") {
+    return 0;
+  }
+
   const { videoHash, filename } = videoContext;
   const reqMeta = parseReleaseMetadata(filename);
 
   const matchedByHex =
-    (candidate.MatchedBy === "moviehash") ||
+    candidate.MatchedBy === "moviehash" ||
     (videoHash &&
       candidate.MovieHash &&
       candidate.MovieHash !== "0" &&
@@ -162,7 +177,6 @@ export function scoreSubtitleSync(candidate, videoContext) {
 
   let syncScore = 0;
 
-  // 1. Exact videoHash byte match (gold standard — embedded/extracted or exact file timing)
   if (matchedByHex) {
     syncScore = 1000;
   } else if (reqMeta) {
@@ -172,7 +186,7 @@ export function scoreSubtitleSync(candidate, videoContext) {
     const subMeta = parseReleaseMetadata(movieRel || subFile);
     const subFileMeta = parseReleaseMetadata(subFile);
 
-    const candGroup = (
+    const rawCandGroup = (
       candidate.InfoReleaseGroup ||
       candidate.releaseGroup ||
       subMeta?.releaseGroup ||
@@ -180,13 +194,13 @@ export function scoreSubtitleSync(candidate, videoContext) {
       ""
     )
       .replace(/\[[^\]]*\]/g, "")
+      .replace(/-(?:sdh|hi)$/i, "")
       .toLowerCase();
+    const candGroup = canonicalizeGroup(rawCandGroup);
 
     const candFormat = subMeta?.formatClass || subFileMeta?.formatClass || null;
     const candService = subMeta?.service || subFileMeta?.service || null;
 
-    // Check if the uploader's SubAuthorComment explicitly lists the exact filename stem or release group!
-    // (OpenSubtitles uploaders list all verified-sync releases in SubAuthorComment, e.g., "Dexter.Resurrection.S02E01.1080p.HEVC.x265-MeGusta")
     const commentHasExactFilename =
       reqMeta.lower.length >= 8 && authorComment.includes(reqMeta.lower);
     const commentHasReleaseGroup =
@@ -194,29 +208,22 @@ export function scoreSubtitleSync(candidate, videoContext) {
       reqMeta.releaseGroup.length >= 3 &&
       new RegExp(`[-.\\s]${reqMeta.releaseGroup}\\b`, "i").test(authorComment);
 
-    // 2. Exact stem match (in MovieReleaseName, SubFileName, or explicit SubAuthorComment release list)
     if (
       (subMeta && subMeta.lower === reqMeta.lower) ||
       (subFileMeta && subFileMeta.lower.startsWith(reqMeta.lower)) ||
       commentHasExactFilename
     ) {
       syncScore = 500;
-    }
-    // 3. Exact release group match (in InfoReleaseGroup, MovieReleaseName, SubFileName, or SubAuthorComment)
-    // Note: If the subtitle explicitly names our releaseGroup inside SubAuthorComment (e.g. "-MeGusta"),
-    // the uploader has already verified it is in sync regardless of whether the file omitted "WEB" in its title!
-    else if (
+    } else if (
       reqMeta.releaseGroup &&
-      ((commentHasReleaseGroup) ||
+      (commentHasReleaseGroup ||
         (((candGroup && reqMeta.releaseGroup === candGroup) ||
           subMeta?.tokenSet.has(reqMeta.releaseGroup) ||
           subFileMeta?.tokenSet.has(reqMeta.releaseGroup)) &&
           (!reqMeta.formatClass || !candFormat || reqMeta.formatClass === candFormat)))
     ) {
       syncScore = 350;
-    }
-    // 4. Same streaming service (e.g., AMZN.WEB-DL == AMZN.WEB-DL)
-    else if (
+    } else if (
       reqMeta.service &&
       candService &&
       reqMeta.service === candService &&
@@ -227,45 +234,79 @@ export function scoreSubtitleSync(candidate, videoContext) {
     }
   }
 
-  // If no strict sync match was found, reject (`0`)
   if (syncScore === 0) {
     return 0;
   }
 
-  // Quality modifiers within the verified-sync tier:
-  // Strongly prefer non-HI (`SubHearingImpaired === "0"`) over HI so fewer tags need stripping,
-  // though our `subedit.js` pipeline strips HI cleanly if an HI track is the only synced match.
+  return syncScore + computeQualityBonus(candidate);
+}
+
+function computeQualityBonus(candidate) {
+  let bonus = 0;
   const isHi = candidate.SubHearingImpaired === "1" || candidate.SubHearingImpaired === 1;
-  if (!isHi) {
-    syncScore += 40;
-  }
-
-  // Prefer trusted uploaders & non-auto-translated English sources
-  if (candidate.SubAutoTranslation === "1") {
-    return 0; // Never chain-translate an auto-translated subtitle
-  }
-  if (candidate.SubForeignPartsOnly === "1") {
-    return 0; // Never translate forced/foreign-parts-only tracks
-  }
-  if (candidate.SubFromTrusted === "1" || candidate.UserRank === "trusted") {
-    syncScore += 15;
-  }
-
+  if (!isHi) bonus += 40;
+  if (candidate.SubFromTrusted === "1" || candidate.UserRank === "trusted") bonus += 15;
   const downloads = parseInt(candidate.SubDownloadsCnt || "0", 10);
   if (downloads > 0) {
-    syncScore += Math.min(20, Math.log10(downloads + 1) * 4);
+    bonus += Math.min(20, Math.log10(downloads + 1) * 4);
   }
+  return bonus;
+}
 
-  return syncScore;
+/**
+ * Compute a release-family signature for deduplicating OpenSubtitles candidates into genuinely
+ * distinct timing editions (e.g., `web:amzn`, `bluray:yify`, `dvd`, or distinct `SubTSGroup`).
+ */
+function getReleaseFamilyDescriptor(cand) {
+  const subFile = cand.SubFileName || cand.subtitleFileName || "";
+  const movieRel = cand.MovieReleaseName || cand.movieReleaseName || "";
+  const meta = parseReleaseMetadata(movieRel || subFile) || parseReleaseMetadata(subFile);
+
+  const formatClass =
+    meta?.formatClass ||
+    (cand.releaseFormat ? cand.releaseFormat.toLowerCase().replace("web-dl", "web") : null) ||
+    "standard";
+  const service = meta?.service ? meta.service.toUpperCase() : null;
+  const group =
+    (cand.InfoReleaseGroup || cand.releaseGroup || meta?.releaseGroup || "")
+      .replace(/-(?:sdh|hi)$/i, "")
+      .trim() || null;
+
+  const formatLabel =
+    formatClass === "bluray"
+      ? "BluRay"
+      : formatClass === "web"
+        ? service
+          ? `${service} WEB-DL`
+          : "WEB-DL"
+        : formatClass === "dvd"
+          ? "DVDRip"
+          : formatClass === "hdtv"
+            ? "HDTV"
+            : "Standard";
+
+  // Family key ensures we pick genuinely different timing masters (never 2 BluRay rips from the same timing group)
+  const tsGroup = cand.SubTSGroup ? `ts${cand.SubTSGroup}` : null;
+  const familyKey = `${formatClass}:${service || ""}:${tsGroup || (group ? group.toLowerCase() : "generic")}`;
+  // Coarser bucket (`bluray`, `web:AMZN`, `web:`, `dvd`, `hdtv`) so we prefer different format classes first!
+  const formatBucket = `${formatClass}:${service || ""}`;
+
+  const cleanReleaseName = (movieRel || subFile || String(cand.IDSubtitleFile))
+    .replace(/\.(srt|sub)$/i, "")
+    .trim();
+
+  return {
+    familyKey,
+    formatBucket,
+    formatClass,
+    formatLabel,
+    group,
+    cleanReleaseName,
+  };
 }
 
 /**
  * Parse Stremio's `id` and `extra` parameters.
- * Examples:
- * - Movie: `id = "tt0133093"`
- * - Series: `id = "tt0903747:1:1"` (imdbId:season:episode)
- * - Anime: `id = "kitsu:12345:1"`
- * - Extra: `"videoHash=09a2c49766325920&videoSize=733999104&filename=The.Matrix.1999.1080p.BluRay.x264-AMIABLE.mkv"`
  */
 export function parseStremioRequest(type, rawId, rawExtra = "") {
   const decodedId = decodeURIComponent(rawId || "").replace(/\.json$/i, "");
@@ -305,10 +346,13 @@ export function parseStremioRequest(type, rawId, rawExtra = "") {
 }
 
 /**
- * Query OpenSubtitles REST API + Stremio OpenSubtitles v3 for synced English subtitles.
- * Returns `{ fileId, downloadUrl, releaseName, syncScore, matchReason }` or `null` if no synced English sub exists.
+ * Query OpenSubtitles REST API + Stremio OpenSubtitles v3 and return up to `maxOptions` (default 3)
+ * genuinely distinct English subtitle release options:
+ * - Option 1 (if matched): The verified Exact Hash / Exact Release match (`★ Synced • ...`).
+ * - Up to 2 distinct alternative release masters (different format class / timing group, e.g. BluRay vs WEB-DL vs DVD)
+ *   so the user can always pick an alternative or manually sync if the torrent filename was unlabelled.
  */
-export async function findSyncedEnglishSubtitle(reqContext, strictSyncOnly = true, env = {}) {
+export async function findEnglishSubtitleOptions(reqContext, env = {}, maxOptions = 3) {
   const { imdbId, season, episode, videoHash, videoSize, filename } = reqContext;
 
   const osRestBase = (env?.OS_REST_BASE || DEFAULT_OS_REST_BASE).replace(/\/+$/, "");
@@ -318,10 +362,9 @@ export async function findSyncedEnglishSubtitle(reqContext, strictSyncOnly = tru
 
   const candidates = [];
   const debugSources = { restCount: 0, v3Count: 0, restStatus: null, v3Status: null };
-
-  // 1. Query OpenSubtitles REST API by exact `moviehash` + `moviebytesize` first (fastest, 100% exact sync)
   const searchTasks = [];
 
+  // 1. Query OpenSubtitles REST API by exact `moviehash` + `moviebytesize`
   if (videoHash) {
     const hashUrl =
       `${osRestBase}/search/` +
@@ -329,7 +372,7 @@ export async function findSyncedEnglishSubtitle(reqContext, strictSyncOnly = tru
       `moviehash-${videoHash.toLowerCase()}/sublanguageid-eng`;
 
     searchTasks.push(
-      fetchJsonWithTimeout(hashUrl, { "X-User-Agent": userAgent, "User-Agent": "Mozilla/5.0" }, 4500).then((res) => {
+      fetchJsonWithTimeout(hashUrl, { "X-User-Agent": userAgent }, 4500).then((res) => {
         if (Array.isArray(res?.data)) {
           candidates.push(...res.data);
           debugSources.restCount += res.data.length;
@@ -339,7 +382,7 @@ export async function findSyncedEnglishSubtitle(reqContext, strictSyncOnly = tru
     );
   }
 
-  // 2. Query OpenSubtitles REST API by IMDb ID (+ season/episode) to match by exact `filename` / `releaseGroup`
+  // 2. Query OpenSubtitles REST API by IMDb ID (+ season/episode)
   if (imdbId) {
     const numericImdb = imdbId.replace(/^tt0*/, "");
     let imdbUrl = `${osRestBase}/search/`;
@@ -349,7 +392,7 @@ export async function findSyncedEnglishSubtitle(reqContext, strictSyncOnly = tru
     imdbUrl += `sublanguageid-eng`;
 
     searchTasks.push(
-      fetchJsonWithTimeout(imdbUrl, { "X-User-Agent": userAgent, "User-Agent": "Mozilla/5.0" }, 4500).then((res) => {
+      fetchJsonWithTimeout(imdbUrl, { "X-User-Agent": userAgent }, 4500).then((res) => {
         if (Array.isArray(res?.data)) {
           candidates.push(...res.data);
           debugSources.restCount += res.data.length;
@@ -359,7 +402,7 @@ export async function findSyncedEnglishSubtitle(reqContext, strictSyncOnly = tru
     );
   }
 
-  // 3. Also query Stremio's native OpenSubtitles v3 mirror in parallel as a zero-rate-limit backup
+  // 3. Query Stremio's native OpenSubtitles v3 mirror in parallel
   if (imdbId) {
     const stremioId = season != null && episode != null ? `${imdbId}:${season}:${episode}` : imdbId;
     const extraPath = videoHash
@@ -368,23 +411,24 @@ export async function findSyncedEnglishSubtitle(reqContext, strictSyncOnly = tru
     const osV3Url = `${osStremioBase}/subtitles/${reqContext.type}/${stremioId}${extraPath}.json`;
 
     searchTasks.push(
-      fetchJsonWithTimeout(osV3Url, { "User-Agent": "Mozilla/5.0" }, 4000).then((res) => {
+      fetchJsonWithTimeout(osV3Url, {}, 4000).then((res) => {
         debugSources.v3Status = res?.status;
         const data = res?.data;
         if (data && Array.isArray(data.subtitles)) {
           for (const s of data.subtitles) {
             if (s.lang === "eng" && s.url) {
-              // Extract fileId from subs5.strem.io URL if present
               const fileIdMatch = s.url.match(/\/file\/(\d+)/);
               candidates.push({
                 IDSubtitleFile: fileIdMatch ? fileIdMatch[1] : s.id,
                 SubFileName: s.subtitleFileName || "",
                 MovieReleaseName: s.movieReleaseName || "",
                 InfoReleaseGroup: s.releaseGroup || "",
+                releaseFormat: s.releaseFormat || "",
                 SubTSGroup: s.g || null,
                 SubFormat: "srt",
                 SubLanguageID: "eng",
-                SubHearingImpaired: s.subtitleFileName && /[-.]HI\b/i.test(s.subtitleFileName) ? "1" : "0",
+                SubHearingImpaired:
+                  s.subtitleFileName && /[-.](?:HI|SDH)\b/i.test(s.subtitleFileName) ? "1" : "0",
                 MatchedBy: s.m === "h" ? "moviehash" : "imdbid",
                 DirectUtf8Url: s.url,
               });
@@ -399,11 +443,10 @@ export async function findSyncedEnglishSubtitle(reqContext, strictSyncOnly = tru
   await Promise.allSettled(searchTasks);
   reqContext.debugSources = debugSources;
 
-  if (candidates.length === 0) return null;
+  if (candidates.length === 0) return [];
 
-  // Merge candidates by IDSubtitleFile so rich metadata from OpenSubtitles REST (like `SubAuthorComment`,
-  // `SubHearingImpaired`, `SubDownloadsCnt`, `SubFromTrusted`) is never overwritten by the stripped-down
-  // `opensubtitles-v3.strem.io` entry!
+  // Merge candidates by IDSubtitleFile so rich metadata from OpenSubtitles REST (`SubAuthorComment`,
+  // `SubHearingImpaired`, `SubDownloadsCnt`) is preserved alongside `DirectUtf8Url` and `SubTSGroup`.
   const byFileId = new Map();
   for (const cand of candidates) {
     const fileId = String(cand.IDSubtitleFile || "");
@@ -417,17 +460,19 @@ export async function findSyncedEnglishSubtitle(reqContext, strictSyncOnly = tru
         ...existing,
         SubAuthorComment: existing.SubAuthorComment || cand.SubAuthorComment || "",
         DirectUtf8Url: existing.DirectUtf8Url || cand.DirectUtf8Url || null,
+        SubTSGroup: existing.SubTSGroup || cand.SubTSGroup || null,
+        releaseFormat: existing.releaseFormat || cand.releaseFormat || "",
       });
     }
   }
 
-  let bestCandidate = null;
-  let bestScore = 0;
+  const reqMeta = parseReleaseMetadata(filename);
+  const scoredCandidates = [];
 
-  for (const [fileId, cand] of byFileId.entries()) {
+  for (const [, cand] of byFileId.entries()) {
     if (cand.SubFormat && cand.SubFormat.toLowerCase() !== "srt") continue;
+    if (cand.SubAutoTranslation === "1" || cand.SubForeignPartsOnly === "1") continue;
 
-    // Ensure season/episode matches if this is a series request
     if (season != null && cand.SeriesSeason && String(cand.SeriesSeason) !== "0") {
       if (parseInt(cand.SeriesSeason, 10) !== season) continue;
     }
@@ -435,34 +480,110 @@ export async function findSyncedEnglishSubtitle(reqContext, strictSyncOnly = tru
       if (parseInt(cand.SeriesEpisode, 10) !== episode) continue;
     }
 
-    const score = scoreSubtitleSync(cand, { videoHash, videoSize, filename });
-    if (score > bestScore) {
-      bestScore = score;
-      bestCandidate = cand;
+    const exactSyncScore = scoreSubtitleSync(cand, { videoHash, videoSize, filename });
+    const desc = getReleaseFamilyDescriptor(cand);
+
+    // Base quality score for ranking the best representative within each distinct release family
+    let familyRankScore = computeQualityBonus(cand);
+    // Prefer candidates that actually specify a known rip format / release group
+    if (desc.formatClass !== "standard") familyRankScore += 25;
+    if (desc.group) familyRankScore += 15;
+    // Slight boost if formatClass matches the user's video formatClass
+    if (reqMeta?.formatClass && desc.formatClass === reqMeta.formatClass) {
+      familyRankScore += 30;
     }
+
+    scoredCandidates.push({
+      cand,
+      exactSyncScore,
+      familyRankScore,
+      desc,
+    });
   }
 
-  if (!bestCandidate || bestScore === 0) {
-    return null;
+  if (scoredCandidates.length === 0) return [];
+
+  // Sort primarily by exactSyncScore descending, then by familyRankScore descending
+  scoredCandidates.sort((a, b) => {
+    if (b.exactSyncScore !== a.exactSyncScore) return b.exactSyncScore - a.exactSyncScore;
+    return b.familyRankScore - a.familyRankScore;
+  });
+
+  const selected = [];
+  const usedFamilyKeys = new Set();
+  const usedFormatBuckets = new Set();
+  const usedReleaseNames = new Set();
+
+  // Pass 1: If we have an Exact Sync match (`exactSyncScore >= 200`), always include the #1 exact match first!
+  if (scoredCandidates[0].exactSyncScore >= 200) {
+    const top = scoredCandidates[0];
+    selected.push(buildOptionOutput(top, osUtf8DlBase, true));
+    usedFamilyKeys.add(top.desc.familyKey);
+    usedFormatBuckets.add(top.desc.formatBucket);
+    usedReleaseNames.add(top.desc.cleanReleaseName.toLowerCase());
   }
 
-  const fileId = String(bestCandidate.IDSubtitleFile);
-  // Stremio's UTF-8 transcoding proxy (`subs5.strem.io`) serves any OpenSubtitles `IDSubtitleFile`
-  // directly as clean UTF-8 uncompressed `.srt` with no gzip or CP1252 encoding issues!
-  const utf8DownloadUrl =
-    bestCandidate.DirectUtf8Url || `${osUtf8DlBase}/${fileId}`;
+  // Pass 2: Pick up to `maxOptions` genuinely distinct release formats (`formatBucket` differs: e.g. BluRay vs WEB-DL vs DVDRip)
+  for (const item of scoredCandidates) {
+    if (selected.length >= maxOptions) break;
+    const relKey = item.desc.cleanReleaseName.toLowerCase();
+    if (usedFormatBuckets.has(item.desc.formatBucket) || usedReleaseNames.has(relKey)) continue;
 
-  const isExactSync = bestScore >= 200;
-  const isFormatSync = bestScore >= 150 && bestScore < 200;
+    selected.push(buildOptionOutput(item, osUtf8DlBase, item.exactSyncScore >= 200));
+    usedFamilyKeys.add(item.desc.familyKey);
+    usedFormatBuckets.add(item.desc.formatBucket);
+    usedReleaseNames.add(relKey);
+  }
+
+  // Pass 3: If we still have fewer than `maxOptions` and there are other distinct timing groups (`SubTSGroup` / release group), add up to `maxOptions`
+  for (const item of scoredCandidates) {
+    if (selected.length >= maxOptions) break;
+    const relKey = item.desc.cleanReleaseName.toLowerCase();
+    if (usedFamilyKeys.has(item.desc.familyKey) || usedReleaseNames.has(relKey)) continue;
+
+    selected.push(buildOptionOutput(item, osUtf8DlBase, item.exactSyncScore >= 200));
+    usedFamilyKeys.add(item.desc.familyKey);
+    usedReleaseNames.add(relKey);
+  }
+
+  return selected;
+}
+
+/**
+ * Backwards-compatible helper returning the single top subtitle option (or `null`).
+ */
+export async function findSyncedEnglishSubtitle(reqContext, strictSyncOnly = true, env = {}) {
+  const options = await findEnglishSubtitleOptions(reqContext, env, 3);
+  if (options.length === 0) return null;
+  if (strictSyncOnly && !options[0].isExactMatch) return null;
+  return options[0];
+}
+
+function buildOptionOutput(item, osUtf8DlBase, isExactMatch) {
+  const { cand, exactSyncScore, familyRankScore, desc } = item;
+  const fileId = String(cand.IDSubtitleFile);
+  const utf8DownloadUrl = cand.DirectUtf8Url || `${osUtf8DlBase}/${fileId}`;
+  const isHashMatch = exactSyncScore >= 1000;
+
+  let syncType;
+  if (isHashMatch) {
+    syncType = `★ Exact Hash • ${desc.formatLabel}`;
+  } else if (isExactMatch) {
+    syncType = `★ Synced • ${desc.formatLabel}${desc.group ? ` (${desc.group})` : ""}`;
+  } else {
+    syncType = `${desc.formatLabel}${desc.group ? ` • ${desc.group}` : ""}`;
+  }
 
   return {
     fileId,
     downloadUrl: utf8DownloadUrl,
-    fallbackGzUrl: bestCandidate.SubDownloadLink || null,
-    releaseName: bestCandidate.MovieReleaseName || bestCandidate.SubFileName || fileId,
-    syncScore: bestScore,
-    isHashMatch: bestScore >= 1000,
-    syncType: bestScore >= 1000 ? "Exact Hash" : isExactSync ? "Exact Release" : isFormatSync ? "Format Sync" : "Best Match",
+    fallbackGzUrl: cand.SubDownloadLink || null,
+    releaseName: desc.cleanReleaseName,
+    formatLabel: desc.formatLabel,
+    syncScore: exactSyncScore || familyRankScore,
+    isHashMatch,
+    isExactMatch,
+    syncType,
   };
 }
 

@@ -110,15 +110,24 @@ const UPPERCASE_WHITELIST = new Set([
  */
 const CREDIT_PATTERNS = [
   /subtitles?\s+by\b/i,
-  /synced\s+and\s+corrected\s+by/i,
+  /synced\s+(and\s+corrected\s+)?by/i,
+  /corrected\s+by\b/i,
+  /captions?\s+by\b/i,
+  /transcribed\s+by\b/i,
+  /encoded\s+by\b/i,
+  /ripped\s+by\b/i,
   /resync\s+by\b/i,
   /opensubtitles\.org/i,
   /subdl\.com/i,
+  /subscene\.com/i,
   /addic7ed\.com/i,
   /www\.podnapisi/i,
-  /yts\.mx|yify/i,
+  /yts\.(mx|lt|am|ag)|yify/i,
   /support\s+us\s+and\s+become\s+vip/i,
   /advertise\s+your\s+product\s+or\s+brand/i,
+  /please\s+rate\s+this\s+subtitle/i,
+  /^https?:\/\/\S+$/i,
+  /^www\.\S+\.\w+$/i,
 ];
 
 /**

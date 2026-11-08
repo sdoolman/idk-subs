@@ -11,13 +11,16 @@ import {
   parseReleaseMetadata,
   scoreSubtitleSync,
 } from "../src/sources.js";
+import { partitionIntoSceneBatches } from "../src/translator.js";
 
 describe("SubtitleEdit (libse) Pre-Processing Port", () => {
-  it("strips [HI] and (SDH) tags, nested tags, and music cues completely", () => {
+  it("strips [HI] and (SDH) tags, nested tags, watermarks, and music cues completely", () => {
     assert.equal(cleanCueForTranslation("[sighs]"), "");
     assert.equal(cleanCueForTranslation("♪ Always look on the bright side of life ♪"), "");
+    assert.equal(cleanCueForTranslation("Synced and corrected by Eldererman"), "");
+    assert.equal(cleanCueForTranslation("Subtitles by OpenSubtitles.org"), "");
     assert.equal(
-      cleanCueForTranslation("(WOMAN (V.O.)): Where are you going?\n[door slams]"),
+      cleanCueForTranslation("{\\an8}(WOMAN (V.O.)): Where are you going?\n[door slams]"),
       "Where are you going?"
     );
   });
@@ -75,8 +78,8 @@ describe("SubtitleEdit (libse) Hebrew AutoBreakLine & RTL Punctuation Port", () 
   });
 });
 
-describe("Strict Exact-Sync Gate", () => {
-  it("accepts exact videoHash matches and exact release group matches, rejecting mismatched releases", () => {
+describe("Release Sync & Content-Adaptive Scene Batching", () => {
+  it("accepts exact videoHash, release groups, YTS/YIFY aliases, and QxR/Tigole bracketed filenames", () => {
     const videoContext = {
       videoHash: "09a2c49766325920",
       filename: "Severance.S02E01.1080p.ATVP.WEB-DL.DDP5.1.H.264-FLUX.mkv",
@@ -104,7 +107,7 @@ describe("Strict Exact-Sync Gate", () => {
     };
     assert.equal(scoreSubtitleSync(wrongBlurayCand, videoContext), 0);
 
-    // Also matches when the torrent has a tracker suffix like [EZTVx.to] and the release is listed in SubAuthorComment
+    // Matches when the torrent has a tracker suffix like [EZTVx.to] and the release is listed in SubAuthorComment
     const dexterContext = {
       videoHash: null,
       filename: "Dexter.Resurrection.S02E01.1080p.HEVC.x265-MeGusta[EZTVx.to].mkv",
@@ -118,7 +121,7 @@ describe("Strict Exact-Sync Gate", () => {
     };
     assert.equal(scoreSubtitleSync(commentCand, dexterContext) >= 500, true);
 
-    // Dot/space-separated release group without hyphen (e.g. `.x264.YIFY` or `(1080p AMZN WEB-DL x265 Silence)`)
+    // Dot/space-separated YIFY & YTS.MX alias matching
     const yifyCand = {
       IDSubtitleFile: "1954550756",
       MovieReleaseName: "Hocus.Pocus.1993.720p.BrRip.x264.YIFY",
@@ -126,10 +129,37 @@ describe("Strict Exact-Sync Gate", () => {
       InfoReleaseGroup: "YIFY",
       SubHearingImpaired: "0",
     };
-    const yifyScore = scoreSubtitleSync(yifyCand, {
-      videoHash: null,
-      filename: "Hocus.Pocus.1993.1080p.BrRip.x264.YIFY.mp4",
-    });
-    assert.ok(yifyScore >= 350, `Expected dot-separated YIFY release group match >= 350, got ${yifyScore}`);
+    assert.ok(
+      scoreSubtitleSync(yifyCand, {
+        videoHash: null,
+        filename: "Hocus.Pocus.1993.1080p.BrRip.x264.YIFY.mp4",
+      }) >= 350
+    );
+    assert.ok(
+      scoreSubtitleSync(yifyCand, {
+        videoHash: null,
+        filename: "Hocus.Pocus.1993.1080p.BluRay.x264-[YTS.MX].mp4",
+      }) >= 350
+    );
+
+    // Preserves QxR / Tigole bracketed metadata
+    const tigoleMeta = parseReleaseMetadata(
+      "Hocus Pocus (1993) [1080p x265 10bit BluRay Tigole].mkv"
+    );
+    assert.equal(tigoleMeta.releaseGroup, "tigole");
+    assert.equal(tigoleMeta.formatClass, "bluray");
+  });
+
+  it("caps total batches at <= 24 even for 2000-cue 3-hour movies and splits at natural scene gaps", () => {
+    const fakeMovieCues = Array.from({ length: 2000 }, (_, idx) => ({
+      id: idx + 1,
+      startMs: idx * 4000 + (idx % 95 === 0 ? 5000 : 0),
+      endMs: idx * 4000 + 2500 + (idx % 95 === 0 ? 5000 : 0),
+      englishText: `Line ${idx + 1}`,
+    }));
+    const batches = partitionIntoSceneBatches(fakeMovieCues, 80, 24);
+    assert.ok(batches.length <= 24, `Expected <= 24 batches, got ${batches.length}`);
+    const total = batches.reduce((acc, b) => acc + b.length, 0);
+    assert.equal(total, 2000);
   });
 });
