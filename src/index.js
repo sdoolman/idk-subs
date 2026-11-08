@@ -26,19 +26,13 @@ import { adaptSrtToHebrew } from "./translator.js";
 
 const ADDON_MANIFEST = {
   id: "community.hebrew-ai-subs.v3",
-  version: "3.0.0",
+  version: "3.1.0",
   name: "idk subs (Gemma 4 + SubtitleEdit)",
   description:
-    "AI-adapted Israeli Hebrew subtitles powered by Cloudflare Workers AI (Gemma 4 26B-A4B) & Nikse SubtitleEdit (libse). Strict exact-sync matching only.",
-  types: ["movie", "series"],
+    "AI-adapted Israeli Hebrew subtitles powered by Cloudflare Workers AI (Gemma 4 26B-A4B) & Nikse SubtitleEdit (libse).",
+  types: ["movie", "series", "anime"],
   catalogs: [],
-  resources: [
-    {
-      name: "subtitles",
-      types: ["movie", "series"],
-      idPrefixes: ["tt", "kitsu"],
-    },
-  ],
+  resources: ["subtitles"],
   idPrefixes: ["tt", "kitsu"],
   behaviorHints: {
     configurable: false,
@@ -58,6 +52,7 @@ const CORS_HEADERS = {
  */
 const inFlightTranslations = new Map();
 const memorySrtCache = new Map();
+const recentRequests = [];
 
 export default {
   async fetch(request, env, ctx) {
@@ -88,6 +83,7 @@ export default {
           inFlightJobs: inFlightTranslations.size,
           memoryCachedFiles: memorySrtCache.size,
           strictSyncOnly: (env?.STRICT_SYNC_ONLY ?? "true") !== "false",
+          recentRequests: recentRequests.slice(-15),
         });
       }
 
@@ -139,6 +135,14 @@ async function handleSubtitlesQuery(url, type, rawId, rawExtra, env, ctx) {
 
   const sourceInfo = await findSyncedEnglishSubtitle(reqContext, strictSyncOnly, env);
 
+  recentRequests.push({
+    ts: new Date().toISOString(),
+    path: url.pathname,
+    reqContext,
+    matched: sourceInfo ? { fileId: sourceInfo.fileId, releaseName: sourceInfo.releaseName, syncScore: sourceInfo.syncScore } : null,
+  });
+  if (recentRequests.length > 30) recentRequests.shift();
+
   // Strict Sync Gate: If no synced English subtitle exists for this release/hash,
   // return empty list (just like Wizdom when no subtitle is found) and spend 0 AI tokens!
   if (!sourceInfo) {
@@ -163,7 +167,7 @@ async function handleSubtitlesQuery(url, type, rawId, rawExtra, env, ctx) {
     );
   }
 
-  const syncLabel = sourceInfo.isHashMatch ? "Exact Hash Sync" : "Release Sync";
+  const syncLabel = sourceInfo.syncType || (sourceInfo.isHashMatch ? "Exact Hash" : "Release Sync");
 
   return jsonResponse(
     {

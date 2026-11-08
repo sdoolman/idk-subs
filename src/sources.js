@@ -190,6 +190,17 @@ export function scoreSubtitleSync(candidate, videoContext) {
     ) {
       syncScore = 220;
     }
+    // 6. Same rip format class (e.g., both BluRay/BDRip/Remux or both WEB-DL/WEBRip)
+    // All standard BluRay rips of the same movie share the exact retail disc frame timing,
+    // and standard WEB-DL/WEBRip releases share the digital master timing.
+    else if (reqMeta.formatClass && candFormat && reqMeta.formatClass === candFormat) {
+      syncScore = 150;
+    }
+  } else if (!videoHash && !filename) {
+    // 7. When a Stremio client (like Stremio Web or an external player stream) does not pass
+    // `videoHash` or `filename` at all, score by trusted/popular primary English release so
+    // the addon still loads in the Hebrew providers list instead of disappearing!
+    syncScore = 110;
   }
 
   // If no strict sync match was found, reject (`0`)
@@ -280,12 +291,6 @@ export async function findSyncedEnglishSubtitle(reqContext, strictSyncOnly = tru
   const osStremioBase = (env?.OS_STREMIO_BASE || DEFAULT_OS_STREMIO_BASE).replace(/\/+$/, "");
   const osUtf8DlBase = (env?.OS_UTF8_DL_BASE || DEFAULT_OS_UTF8_DL_BASE).replace(/\/+$/, "");
   const userAgent = env?.OS_USER_AGENT || DEFAULT_USER_AGENT;
-
-  // Strict Sync Gate: If strict mode is enabled and Stremio provided neither videoHash nor filename,
-  // we cannot verify sync unless we only accept single-release episodes.
-  if (strictSyncOnly && !videoHash && !filename) {
-    return null;
-  }
 
   const candidates = [];
 
@@ -394,6 +399,9 @@ export async function findSyncedEnglishSubtitle(reqContext, strictSyncOnly = tru
   const utf8DownloadUrl =
     bestCandidate.DirectUtf8Url || `${osUtf8DlBase}/${fileId}`;
 
+  const isExactSync = bestScore >= 200;
+  const isFormatSync = bestScore >= 150 && bestScore < 200;
+
   return {
     fileId,
     downloadUrl: utf8DownloadUrl,
@@ -401,6 +409,7 @@ export async function findSyncedEnglishSubtitle(reqContext, strictSyncOnly = tru
     releaseName: bestCandidate.MovieReleaseName || bestCandidate.SubFileName || fileId,
     syncScore: bestScore,
     isHashMatch: bestScore >= 1000,
+    syncType: bestScore >= 1000 ? "Exact Hash" : isExactSync ? "Exact Release" : isFormatSync ? "Format Sync" : "Best Match",
   };
 }
 
