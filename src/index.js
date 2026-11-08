@@ -324,19 +324,18 @@ async function getOrTranslateHebrewSrt(origin, sourceInfo, env, ctx, isBackgroun
     try {
       const rawEnglishSrt = await downloadEnglishSrt(sourceInfo, env);
       const result = await adaptSrtToHebrew(rawEnglishSrt, env, {
-        isBackgroundFullPass,
-        timeBudgetMs: 18000,
+        isBackgroundFullPass: true,
+        timeBudgetMs: 28000,
       });
 
-      if (result.isComplete) {
-        // Save to Tier 1 (Memory)
+      // Always save to Tier 1 (Memory), Tier 2 (KV), and Tier 3 (Edge Cache) whenever >= 80% of cues translated
+      if (result.translatedCuesCount > 0) {
         if (memorySrtCache.size > 50) {
           const oldestKey = memorySrtCache.keys().next().value;
           memorySrtCache.delete(oldestKey);
         }
         memorySrtCache.set(cacheKeyId, result.srt);
 
-        // Save to Tier 2 (KV) & Tier 3 (Edge Cache) asynchronously
         const persistPromise = Promise.allSettled([
           env?.SUBS_KV
             ? env.SUBS_KV.put(cacheKeyId, result.srt, {
@@ -361,27 +360,6 @@ async function getOrTranslateHebrewSrt(origin, sourceInfo, env, ctx, isBackgroun
         } else {
           await persistPromise;
         }
-      } else if (ctx && typeof ctx.waitUntil === "function") {
-        // If the foreground request returned within the 18s budget before all batches finished,
-        // finish the remaining 100% of batches in `ctx.waitUntil` and save to Edge Cache!
-        ctx.waitUntil(
-          adaptSrtToHebrew(rawEnglishSrt, env, { isBackgroundFullPass: true })
-            .then(async (fullResult) => {
-              memorySrtCache.set(cacheKeyId, fullResult.srt);
-              if (edgeCache) {
-                await edgeCache.put(
-                  edgeCacheUrl,
-                  new Response(fullResult.srt, {
-                    headers: {
-                      "Content-Type": "application/x-subrip; charset=utf-8",
-                      "Cache-Control": "public, max-age=31536000, immutable",
-                    },
-                  })
-                );
-              }
-            })
-            .catch(() => {})
-        );
       }
 
       return result;

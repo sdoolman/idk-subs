@@ -485,6 +485,7 @@ async function fetchWithTimeout(url, headers = {}, timeoutMs = 5000) {
     return await fetch(url, {
       headers: {
         Accept: "application/json, text/plain, */*",
+        "User-Agent": "Mozilla/5.0",
         ...headers,
       },
       signal: controller.signal,

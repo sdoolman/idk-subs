@@ -34,8 +34,8 @@ MODULES = [
 
 DEFAULT_VARS = {
     "AI_MODEL": "@cf/google/gemma-4-26b-a4b-it",
-    "BATCH_SIZE": "25",
-    "MAX_CONCURRENT_BATCHES": "6",
+    "BATCH_SIZE": "35",
+    "MAX_CONCURRENT_BATCHES": "35",
     "SINGLE_LINE_MAX_LENGTH": "42",
     "MERGE_LINES_SHORTER_THAN": "43",
     "STRICT_SYNC_ONLY": "true",
