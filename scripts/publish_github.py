@@ -31,6 +31,7 @@ REPO_NAME = "idk-subs"
 
 FILES_TO_PUBLISH = [
     ".gitignore",
+    "LICENSE",
     "package.json",
     "wrangler.toml",
     "README.md",

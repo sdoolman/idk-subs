@@ -8,6 +8,8 @@ workers_dev = true
 binding = "AI"
 
 # Cloudflare KV namespace for permanent subtitle caching across all global edge PoPs.
+# Change `id` to your own KV namespace ID (`npx wrangler kv namespace create SUBS_KV`),
+# or run `python scripts/deploy_cloudflare.py` which creates & binds it automatically!
 [[kv_namespaces]]
 binding = "SUBS_KV"
 id = "caff81b62bd04debb6814ba189735282"

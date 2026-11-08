@@ -1,59 +1,116 @@
-# idk-subs v3.0 (Cloudflare Workers AI + Nikse SubtitleEdit Port)
+# idk-subs v3 🍿🇮🇱
 
-A 100% free, zero-maintenance, 0ms cold-start Stremio addon for **AI-adapted Israeli Hebrew subtitles**, built natively for **Cloudflare Workers** + **Cloudflare Workers AI (`@cf/google/gemma-3-12b-it`)** and **Nikse's SubtitleEdit (`libse`)** algorithms.
-
----
-
-## Why the Original `best-free-hebrew-ai-subs-v2` Was Broken
-1. **Permanent `"מתרגם כתוביות... נסה שוב בעוד כמה שניות"` Loop:** The original addon returned a 1-cue placeholder SRT while trying to translate in the background, and its background AI key/quota was exhausted.
-2. **Cache Poisoning (`max-age=1800`):** It attached `Cache-Control: public, max-age=1800` to that placeholder SRT, forcing Stremio and Cloudflare to cache the error message for 30 minutes.
-3. **Render Free-Tier Spin-Downs:** Hosted on Render's free tier, which sleeps after 15 minutes of inactivity (causing 30–50s cold-start timeouts in Stremio and wiping its in-memory cache).
+**An open-source, zero-maintenance Stremio addon for AI-adapted Hebrew subtitles that doesn't get stuck on `"מתרגם כתוביות... נסה שוב בעוד כמה שניות"`.**
 
 ---
 
-## How `idk-subs v3.0` Fixes Everything
-1. **100% Uptime & Zero Maintenance (Cloudflare Workers):**
-   - Never sleeps, 0ms cold starts worldwide.
-   - Uses native **Cloudflare Workers AI** (`env.AI` with `@cf/google/gemma-3-12b-it`)—no external API keys to rotate or expire.
-   - Built-in **3-Tier Caching**: Isolate Memory -> Cloudflare Global Edge Cache (`caches.default`, zero config required) -> Optional Cloudflare KV (`SUBS_KV`).
-2. **Strict Exact-Sync Gate (`src/sources.js`):**
-   - **Never wastes AI tokens on out-of-sync subtitles.**
-   - Only translates when an English subtitle is verified to match your stream's **exact 64-bit `videoHash`** (which matches embedded/extracted tracks and exact video files) or **exact release group + rip format** (`filename`, e.g., `ATVP.WEB-DL-FLUX`).
-   - If no synced English subtitle exists, it immediately returns `{ "subtitles": [] }` (just like Wizdom) and burns **0 tokens**.
-3. **Nikse SubtitleEdit (`libse`) Pre- & Post-Processing (`src/subedit.js`):**
-   - **Pre-Processing (ported from `RemoveTextForHI.cs` & `Utilities.cs`):**
-     - Strips `[HI]`, `(SDH)`, `{tags}`, and nested tags like `(WOMAN (V.O.)):`.
-     - Strips music cues (`♪`, `♫`) and ALL-CAPS sound effects (`THUNDER RUMBLES`) while keeping whitelisted uppercase words (`OK`, `CIA`, `TV`, `I`).
-     - Strips speaker labels (`JOHN:`, `- [SARAH]:`, mid-line `Wait. JOHN: No!`) while automatically inserting dialogue dashes (`- `) when two speakers talk in the same cue.
-     - Unwraps artificial 2-line single-speaker English breaks into a single logical sentence so Gemma 3 12B adapts the full thought naturally.
-   - **Post-Processing (ported from `TextSplit.cs` & `Utilities.cs`):**
-     - **Hebrew `AutoBreakLine`:** Keeps cues $\le 42$ chars on a single line. Breaks longer cues into 2 balanced lines at natural punctuation (`,`, `.`, `?`, `!`) or before Hebrew conjunctions (`אבל`, `כי`, `אם`, `כדי`, `ש...`, `ו...`), and **never** breaks after Hebrew prepositions/construct markers (`את`, `של`, `על`, `עם`, `אל`, `לא`, `אין`).
-     - **Stremio RTL BiDi Punctuation Fix (`\u200F` / RLM):** Wraps Hebrew lines with Unicode Right-to-Left Marks so periods, question marks, exclamation marks, quotes, and leading dialogue dashes (`- `) render on the correct side across all Stremio devices (TV, Android, Desktop, Web).
-4. **Seamless Single-URL Parallel Worker Pool (`src/translator.js` & `src/index.js`):**
-   - Pre-warms translation the instant Stremio queries `/subtitles/...` (`ctx.waitUntil`).
-   - Runs up to 10 concurrent micro-batches in parallel on Cloudflare's edge so a full episode finishes in ~5–10 seconds.
-   - Holds the single `.srt` request open until the parallel pool finishes, returning the complete Hebrew `.srt` in one shot (no "Reload" second track needed).
-   - If the AI provider ever errors or hits daily quota, returns HTTP `503` with `Cache-Control: no-store` (never caching a broken file).
+## Why This Exists
+
+If you watch Stremio in Israel, you probably already have **Wizdom** and **Ktuvit** installed. They're great when a human translator has already subbed your movie or episode—but for niche releases, older seasons, anime, or fresh drops, you're often out of luck.
+
+When **`idk subs` (`best-free-hebrew-ai-subs-v2`)** showed up on `stremio-addons.net`, the concept was awesome: automatic AI-translated Hebrew subtitles right inside Stremio.
+
+The problem? **It broke under its own weight:**
+1. **TheRender Free-Tier Coma:** Hosted on a single free Render container that spins down after 15 minutes of inactivity, causing 40-second cold starts that time out Stremio's subtitle loader.
+2. **The Shared API Key Bottleneck:** One person's AI quota shared with thousands of Stremio users inevitably hits rate limits.
+3. **The 30-Minute Cache Trap:** Whenever it failed or was busy, it returned a 1-line `.srt` (`מתרגם כתוביות... נסה שוב בעוד כמה שניות`) with `Cache-Control: public, max-age=1800`—locking Stremio into caching that placeholder for half an hour.
+
+So instead of relying on one shared server, **this repo lets any dev spin up their own personal, 100% free instance on Cloudflare Workers in 60 seconds**—powered by Cloudflare's built-in **Gemma 4** AI and **SubtitleEdit (`libse`)** algorithms.
 
 ---
 
-## Zero-CLI Browser Deployment (No Local Node.js Needed!)
+## What Makes This Different (Adaptation, Not Just 1:1 Translation)
 
-Because this project has **zero external npm runtime dependencies** (100% pure standard Web/Worker ES Modules), you can deploy it in 2 minutes either via **GitHub + Cloudflare Dashboard** or via **Wrangler CLI**:
+Throwing raw English `.srt` files at a translation API produces terrible Hebrew subtitles: `[SIGHING]` gets translated literally, `JOHN:` prefixes eat up screen space, lines break mid-phrase (`את\nהבית`), and Stremio flips punctuation to the wrong side of the sentence (`?מה קורה`).
 
-### Option A: Deploy via Cloudflare Dashboard (100% in Browser)
-1. Push this folder (`c:\Users\stavd\Downloads\idk-subs`) to a free private or public GitHub repository (or upload the files in the Cloudflare Workers dashboard).
-2. Go to **Cloudflare Dashboard** -> **Compute (Workers & Pages)** -> **Create** -> **Import a repository** (or create a Worker).
-3. Cloudflare will automatically read [`wrangler.toml`](file:///c:/Users/stavd/Downloads/idk-subs/wrangler.toml) and bind native Workers AI (`AI`).
-4. Once deployed, install your addon in Stremio using:
+`idk-subs v3` runs a **3-stage hybrid pipeline** inspired by Israeli fansub standards:
+
+### 1. Deterministic Pre-Processing (Ported from Nikse's SubtitleEdit `libse`)
+Before the AI sees a single word, [`src/subedit.js`](src/subedit.js) cleans the English track:
+- **Strips HI / SDH Clutter:** Removes `[sighs]`, `(music playing)`, nested `(WOMAN (V.O.)):`, `♪` lyric lines, and scene watermarks.
+- **Smart Speaker Colon Removal:** Strips `JOHN:` and mid-line `Wait here. SARAH: No way!` while automatically inserting dialogue dashes (`- `) when two speakers share a cue.
+- **Unwraps Artificial English Line Breaks:** Merges 2-line single-speaker English wraps back into a single sentence so the AI translates the complete thought instead of two awkward half-clauses.
+
+### 2. Contextual Scene Adaptation (`@cf/google/gemma-4-26b-a4b-it`)
+- Uses **Cloudflare Workers AI** natively (`env.AI`)—**zero external API keys** to create, rotate, or pay for.
+- Translates in **contextual scene batches** across a parallel worker pool so the model knows who is talking to whom (crucial for Hebrew male/female verb & pronoun agreement) and adapts idioms into natural spoken Hebrew.
+
+### 3. Deterministic Hebrew Post-Processing
+- **Hebrew-Aware `AutoBreakLine`:** Keeps cues $\le 42$ chars on one line. Splits longer cues into two balanced lines at natural punctuation or before conjunctions (`אבל`, `כי`, `אם`, `כדי`, `ש...`), while **never** splitting after Hebrew prepositions or construct-state markers (`את`, `של`, `על`, `עם`, `אל`, `לא`, `אין`).
+- **Bulletproof Stremio RTL Punctuation (`\u200F`):** Wraps Hebrew lines with Unicode Right-to-Left Marks (RLM) so trailing `?`, `!`, `.`, and leading `- ` dialogue dashes always render on the right side across Desktop, Android TV, and Web.
+
+---
+
+## Known Limitations (Read Before Using!)
+
+To keep this 100% free and genuinely good, this project makes a few deliberate trade-offs:
+
+1. **Strict Exact-Sync Gate (No Out-of-Sync Token Burn):**
+   Stremio addons cannot read embedded MKV subtitle tracks from your local player—they only receive `imdbId`, `videoHash`, `videoSize`, and `filename`. To avoid burning your daily AI quota translating a BluRay subtitle for a WEB-DL stream (which would be completely out of sync), [`src/sources.js`](src/sources.js) **only** translates when OpenSubtitles has an English `.srt` matching your stream's **exact `videoHash`** or **exact release group/format** (e.g., `ATVP.WEB-DL-FLUX`). If no synced English sub exists, the addon returns an empty list (`[]`) just like Wizdom and spends **0 tokens**.
+2. **First-Watch Latency (~10–20 Seconds):**
+   Adapting 600–1,200 lines through an LLM takes ~10–20 seconds on the very first play. The Worker starts pre-translating the instant you click a stream (while your video is still buffering), and caches the result in **Cloudflare KV + Edge Cache** so every replay or seek is instant (`0ms`).
+3. **Cloudflare Free Tier Daily Quota (10,000 Neurons/day):**
+   Cloudflare's free tier gives you 10,000 Workers AI Neurons per day at zero cost. That's plenty for your personal daily watching (several brand-new uncached episodes/movies per day, plus unlimited cached plays), which is why **self-hosting your own fork** is the way to go.
+
+---
+
+## Deploy Your Own Free Fork in 60 Seconds
+
+This project has **zero runtime `npm` dependencies**—it runs entirely on native Cloudflare Workers Web APIs.
+
+### Option 1: Fork & GitHub Actions (Recommended)
+1. **Fork** this repository on GitHub.
+2. In your fork, go to **Settings -> Secrets and variables -> Actions** and add:
+   - `CLOUDFLARE_ACCOUNT_ID`: From your [Cloudflare Dashboard](https://dash.cloudflare.com/) sidebar.
+   - `CLOUDFLARE_API_TOKEN`: Create a token at [Cloudflare API Tokens](https://dash.cloudflare.com/profile/api-tokens) using the **Edit Cloudflare Workers** template + **Workers AI (Edit)** + **Workers KV Storage (Edit)** permissions.
+3. Trigger the **Test & Deploy Cloudflare Worker** workflow under the **Actions** tab (or push a commit to `main`).
+4. Paste your live manifest URL into Stremio:
    ```text
    https://idk-subs.<your-subdomain>.workers.dev/manifest.json
    ```
 
-### Option B: Deploy via Terminal (Wrangler CLI)
-If you install Node.js (`winget install OpenJS.NodeJS.LTS`), run:
-```powershell
-cd c:\Users\stavd\Downloads\idk-subs
+### Option 2: Direct Local Deploy (With Node.js or Python)
+```bash
+# Using Wrangler (Node.js):
 npm install
 npx wrangler deploy
+
+# Or using the built-in zero-dependency Python 3 script (reads ~/.cloudflare/config or env vars):
+python scripts/deploy_cloudflare.py
 ```
+
+### Configuration (`wrangler.toml`)
+All upstream URLs and tuning knobs live in [`wrangler.toml`](wrangler.toml) `[vars]` so you can tweak them in the Cloudflare Dashboard without touching code:
+- `AI_MODEL`: Defaults to `@cf/google/gemma-4-26b-a4b-it`
+- `STRICT_SYNC_ONLY`: `"true"` (default) — set to `"false"` if you want it to translate the most popular English subtitle even when `videoHash`/`filename` doesn't match.
+- `SINGLE_LINE_MAX_LENGTH`: `"42"` (standard Israeli broadcast max line length)
+
+---
+
+## Contributing
+
+Contributions, Hebrew linguistic tweaks, and PRs are very welcome!
+
+Some great areas to contribute:
+- **Hebrew Line-Break & Adaptation Rules ([`src/subedit.js`](src/subedit.js)):** Expanding `HEBREW_NO_BREAK_AFTER` (construct states / סמיכות), `HEBREW_BREAK_BEFORE_WORDS`, or `HI_DESCRIPTION_WORDS`.
+- **Additional Synced English Sources ([`src/sources.js`](src/sources.js)):** Adding more keyless English/anime subtitle providers while respecting the sync scorer.
+- **Prompt Tuning ([`src/translator.js`](src/translator.js)):** Improving slang, gender inference, or batch throughput.
+
+Before opening a PR, run the zero-dependency test suite (requires Node 18+):
+```bash
+node --test test/subedit.test.js
+```
+
+---
+
+## Kudos & Credits 👏
+
+- **Huge kudos to [`idk617866`](https://stremio-addons.net/users/idk617866)**, the creator of the original **idk subs (`best-free-hebrew-ai-subs-v2`)** addon! Having the idea to wire up on-the-fly AI Hebrew translations for Stremio—and generously hosting it for the community—inspired this entire project.
+- **[Nikolaj Lynge Olsson (`niksedk`)](https://github.com/SubtitleEdit/subtitleedit)** and the **SubtitleEdit** contributors: Our HI/SDH tag stripper, speaker colon parser, and `AutoBreakLine` cost functions in [`src/subedit.js`](src/subedit.js) are directly ported from SubtitleEdit's battle-tested `libse` C# engine.
+- **OpenSubtitles** & the **Stremio** team for the subtitle ecosystem and open addon protocol.
+
+---
+
+## License
+
+Licensed under the [MIT License](LICENSE).
