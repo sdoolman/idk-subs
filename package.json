@@ -1,0 +1,15 @@
+{
+  "name": "idk-subs",
+  "version": "3.0.0",
+  "description": "Zero-maintenance Cloudflare Worker Stremio addon for AI-adapted Hebrew subtitles powered by Gemma 3 12B & SubtitleEdit (libse)",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "node --test test/subedit.test.js"
+  },
+  "devDependencies": {
+    "wrangler": "^3.109.0"
+  }
+}

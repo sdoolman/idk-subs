@@ -1,0 +1,25 @@
+name = "idk-subs"
+main = "src/index.js"
+compatibility_date = "2025-02-01"
+workers_dev = true
+
+# Native Cloudflare Workers AI binding (zero external API keys required)
+[ai]
+binding = "AI"
+
+# Cloudflare KV namespace for permanent subtitle caching across all global edge PoPs.
+[[kv_namespaces]]
+binding = "SUBS_KV"
+id = "caff81b62bd04debb6814ba189735282"
+
+[vars]
+AI_MODEL = "@cf/google/gemma-4-26b-a4b-it"
+BATCH_SIZE = "25"
+MAX_CONCURRENT_BATCHES = "6"
+SINGLE_LINE_MAX_LENGTH = "42"
+MERGE_LINES_SHORTER_THAN = "43"
+STRICT_SYNC_ONLY = "true"
+OS_REST_BASE = "https://rest.opensubtitles.org"
+OS_STREMIO_BASE = "https://opensubtitles-v3.strem.io"
+OS_UTF8_DL_BASE = "https://subs5.strem.io/en/download/subencoding-stremio-utf8/src-api/file"
+OS_USER_AGENT = "trailerrs"
