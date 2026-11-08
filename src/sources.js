@@ -177,13 +177,15 @@ export function scoreSubtitleSync(candidate, videoContext) {
       syncScore = 500;
     }
     // 3. Exact release group match (in InfoReleaseGroup, MovieReleaseName, SubFileName, or SubAuthorComment)
+    // Note: If the subtitle explicitly names our releaseGroup inside SubAuthorComment (e.g. "-MeGusta"),
+    // the uploader has already verified it is in sync regardless of whether the file omitted "WEB" in its title!
     else if (
       reqMeta.releaseGroup &&
-      ((candGroup && reqMeta.releaseGroup === candGroup) ||
-        subMeta?.tokenSet.has(reqMeta.releaseGroup) ||
-        subFileMeta?.tokenSet.has(reqMeta.releaseGroup) ||
-        commentHasReleaseGroup) &&
-      (!reqMeta.formatClass || !candFormat || reqMeta.formatClass === candFormat)
+      ((commentHasReleaseGroup) ||
+        (((candGroup && reqMeta.releaseGroup === candGroup) ||
+          subMeta?.tokenSet.has(reqMeta.releaseGroup) ||
+          subFileMeta?.tokenSet.has(reqMeta.releaseGroup)) &&
+          (!reqMeta.formatClass || !candFormat || reqMeta.formatClass === candFormat)))
     ) {
       syncScore = 350;
     }
@@ -289,6 +291,7 @@ export async function findSyncedEnglishSubtitle(reqContext, strictSyncOnly = tru
   const userAgent = env?.OS_USER_AGENT || DEFAULT_USER_AGENT;
 
   const candidates = [];
+  const debugSources = { restCount: 0, v3Count: 0, restStatus: null, v3Status: null };
 
   // 1. Query OpenSubtitles REST API by exact `moviehash` + `moviebytesize` first (fastest, 100% exact sync)
   const searchTasks = [];
@@ -300,8 +303,12 @@ export async function findSyncedEnglishSubtitle(reqContext, strictSyncOnly = tru
       `moviehash-${videoHash.toLowerCase()}/sublanguageid-eng`;
 
     searchTasks.push(
-      fetchJsonWithTimeout(hashUrl, { "X-User-Agent": userAgent }, 4500).then((list) => {
-        if (Array.isArray(list)) candidates.push(...list);
+      fetchJsonWithTimeout(hashUrl, { "X-User-Agent": userAgent, "User-Agent": "Mozilla/5.0" }, 4500).then((res) => {
+        if (Array.isArray(res?.data)) {
+          candidates.push(...res.data);
+          debugSources.restCount += res.data.length;
+        }
+        debugSources.restStatus = res?.status;
       })
     );
   }
@@ -316,8 +323,12 @@ export async function findSyncedEnglishSubtitle(reqContext, strictSyncOnly = tru
     imdbUrl += `sublanguageid-eng`;
 
     searchTasks.push(
-      fetchJsonWithTimeout(imdbUrl, { "X-User-Agent": userAgent }, 4500).then((list) => {
-        if (Array.isArray(list)) candidates.push(...list);
+      fetchJsonWithTimeout(imdbUrl, { "X-User-Agent": userAgent, "User-Agent": "Mozilla/5.0" }, 4500).then((res) => {
+        if (Array.isArray(res?.data)) {
+          candidates.push(...res.data);
+          debugSources.restCount += res.data.length;
+        }
+        debugSources.restStatus = res?.status;
       })
     );
   }
@@ -331,7 +342,9 @@ export async function findSyncedEnglishSubtitle(reqContext, strictSyncOnly = tru
     const osV3Url = `${osStremioBase}/subtitles/${reqContext.type}/${stremioId}${extraPath}.json`;
 
     searchTasks.push(
-      fetchJsonWithTimeout(osV3Url, {}, 4000).then((data) => {
+      fetchJsonWithTimeout(osV3Url, { "User-Agent": "Mozilla/5.0" }, 4000).then((res) => {
+        debugSources.v3Status = res?.status;
+        const data = res?.data;
         if (data && Array.isArray(data.subtitles)) {
           for (const s of data.subtitles) {
             if (s.lang === "eng" && s.url) {
@@ -342,12 +355,14 @@ export async function findSyncedEnglishSubtitle(reqContext, strictSyncOnly = tru
                 SubFileName: s.subtitleFileName || "",
                 MovieReleaseName: s.movieReleaseName || "",
                 InfoReleaseGroup: s.releaseGroup || "",
+                SubTSGroup: s.g || null,
                 SubFormat: "srt",
                 SubLanguageID: "eng",
-                SubHearingImpaired: "0",
+                SubHearingImpaired: s.subtitleFileName && /[-.]HI\b/i.test(s.subtitleFileName) ? "1" : "0",
                 MatchedBy: s.m === "h" ? "moviehash" : "imdbid",
                 DirectUtf8Url: s.url,
               });
+              debugSources.v3Count++;
             }
           }
         }
@@ -356,17 +371,34 @@ export async function findSyncedEnglishSubtitle(reqContext, strictSyncOnly = tru
   }
 
   await Promise.allSettled(searchTasks);
+  reqContext.debugSources = debugSources;
 
   if (candidates.length === 0) return null;
 
-  // Deduplicate by IDSubtitleFile and score each candidate
-  const seenFileIds = new Set();
+  // Merge candidates by IDSubtitleFile so rich metadata from OpenSubtitles REST (like `SubAuthorComment`,
+  // `SubHearingImpaired`, `SubDownloadsCnt`, `SubFromTrusted`) is never overwritten by the stripped-down
+  // `opensubtitles-v3.strem.io` entry!
+  const byFileId = new Map();
+  for (const cand of candidates) {
+    const fileId = String(cand.IDSubtitleFile || "");
+    if (!fileId) continue;
+    const existing = byFileId.get(fileId);
+    if (!existing) {
+      byFileId.set(fileId, { ...cand });
+    } else {
+      byFileId.set(fileId, {
+        ...cand,
+        ...existing,
+        SubAuthorComment: existing.SubAuthorComment || cand.SubAuthorComment || "",
+        DirectUtf8Url: existing.DirectUtf8Url || cand.DirectUtf8Url || null,
+      });
+    }
+  }
+
   let bestCandidate = null;
   let bestScore = 0;
 
-  for (const cand of candidates) {
-    const fileId = String(cand.IDSubtitleFile || "");
-    if (!fileId || seenFileIds.has(fileId)) continue;
+  for (const [fileId, cand] of byFileId.entries()) {
     if (cand.SubFormat && cand.SubFormat.toLowerCase() !== "srt") continue;
 
     // Ensure season/episode matches if this is a series request
@@ -382,7 +414,6 @@ export async function findSyncedEnglishSubtitle(reqContext, strictSyncOnly = tru
       bestScore = score;
       bestCandidate = cand;
     }
-    seenFileIds.add(fileId);
   }
 
   if (!bestCandidate || bestScore === 0) {
@@ -466,9 +497,9 @@ async function fetchWithTimeout(url, headers = {}, timeoutMs = 5000) {
 async function fetchJsonWithTimeout(url, headers = {}, timeoutMs = 5000) {
   try {
     const resp = await fetchWithTimeout(url, headers, timeoutMs);
-    if (!resp.ok) return null;
-    return await resp.json();
-  } catch (_) {
-    return null;
+    if (!resp.ok) return { status: resp.status, data: null };
+    return { status: resp.status, data: await resp.json() };
+  } catch (err) {
+    return { status: err?.message || "error", data: null };
   }
 }
