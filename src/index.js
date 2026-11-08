@@ -76,14 +76,25 @@ export default {
       }
 
       if (path === "/health") {
+        let kvRecent = [];
+        let kvKeys = [];
+        if (env?.SUBS_KV) {
+          try {
+            const rawLog = await env.SUBS_KV.get("debug:recent_requests");
+            if (rawLog) kvRecent = JSON.parse(rawLog);
+            const listRes = await env.SUBS_KV.list({ prefix: "srt:v3:" });
+            kvKeys = (listRes?.keys || []).map((k) => k.name);
+          } catch (_) {}
+        }
         return jsonResponse({
           ok: true,
           version: ADDON_MANIFEST.version,
           model: env?.AI_MODEL || "@cf/google/gemma-4-26b-a4b-it",
           inFlightJobs: inFlightTranslations.size,
           memoryCachedFiles: memorySrtCache.size,
+          kvCachedFiles: kvKeys,
           strictSyncOnly: (env?.STRICT_SYNC_ONLY ?? "true") !== "false",
-          recentRequests: recentRequests.slice(-15),
+          recentRequests: kvRecent.length ? kvRecent : recentRequests.slice(-15),
         });
       }
 
@@ -135,13 +146,38 @@ async function handleSubtitlesQuery(url, type, rawId, rawExtra, env, ctx) {
 
   const sourceInfo = await findSyncedEnglishSubtitle(reqContext, strictSyncOnly, env);
 
-  recentRequests.push({
+  const logEntry = {
     ts: new Date().toISOString(),
     path: url.pathname,
+    search: url.search,
     reqContext,
-    matched: sourceInfo ? { fileId: sourceInfo.fileId, releaseName: sourceInfo.releaseName, syncScore: sourceInfo.syncScore } : null,
-  });
+    matched: sourceInfo
+      ? {
+          fileId: sourceInfo.fileId,
+          releaseName: sourceInfo.releaseName,
+          syncScore: sourceInfo.syncScore,
+          syncType: sourceInfo.syncType,
+        }
+      : null,
+  };
+  recentRequests.push(logEntry);
   if (recentRequests.length > 30) recentRequests.shift();
+
+  if (env?.SUBS_KV && ctx && typeof ctx.waitUntil === "function") {
+    ctx.waitUntil(
+      (async () => {
+        try {
+          const existingRaw = await env.SUBS_KV.get("debug:recent_requests");
+          const list = existingRaw ? JSON.parse(existingRaw) : [];
+          list.push(logEntry);
+          while (list.length > 25) list.shift();
+          await env.SUBS_KV.put("debug:recent_requests", JSON.stringify(list), {
+            expirationTtl: 86400,
+          });
+        } catch (_) {}
+      })()
+    );
+  }
 
   // Strict Sync Gate: If no synced English subtitle exists for this release/hash,
   // return empty list (just like Wizdom when no subtitle is found) and spend 0 AI tokens!

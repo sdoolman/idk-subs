@@ -106,5 +106,19 @@ describe("Strict Exact-Sync Gate", () => {
       SubHearingImpaired: "0",
     };
     assert.equal(scoreSubtitleSync(wrongBlurayCand, videoContext), 0);
+
+    // Also matches when the torrent has a tracker suffix like [EZTVx.to] and the release is listed in SubAuthorComment
+    const dexterContext = {
+      videoHash: null,
+      filename: "Dexter.Resurrection.S02E01.1080p.HEVC.x265-MeGusta[EZTVx.to].mkv",
+    };
+    const commentCand = {
+      MatchedBy: "imdbid",
+      MovieReleaseName: "Dexter.Resurrection.S02E01.1080p.AMZN.WEB-DL.DDP5.1.H.264-playWEB",
+      SubAuthorComment:
+        "Dexter.Resurrection.S02E01.1080p.AMZN.WEB-DL-FLUX\r\nDexter.Resurrection.S02E01.1080p.HEVC.x265-MeGusta\r\nDexter.Resurrection.S02E01.720p.WEB.H264-JFF",
+      SubHearingImpaired: "0",
+    };
+    assert.equal(scoreSubtitleSync(commentCand, dexterContext) >= 500, true);
   });
 });

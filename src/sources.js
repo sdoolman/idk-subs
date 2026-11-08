@@ -62,15 +62,16 @@ export function parseReleaseMetadata(filename) {
 
   const withoutExt = filename
     .replace(/\.(mkv|mp4|avi|mov|webm|srt|sub|ass|vtt)$/i, "")
+    .replace(/\[[^\]]*\]/g, "") // Strip tracker tags like [EZTVx.to], [TGx], [rartv], [ettv]
     .trim();
 
   const lower = withoutExt.toLowerCase();
   const tokens = lower.split(/[\s._\-[\]()]+/).filter(Boolean);
   const tokenSet = new Set(tokens);
 
-  // Extract release group (typically after the last `-`, e.g., `-FLUX`, `-NTb`, `-RARBG`)
+  // Extract release group (typically after the last `-`, e.g., `-FLUX`, `-NTb`, `-MeGusta`)
   let releaseGroup = null;
-  const groupMatch = withoutExt.match(/-([A-Za-z0-9]+)(?:\[[^\]]*\])?$/);
+  const groupMatch = withoutExt.match(/-([A-Za-z0-9]+)$/);
   if (groupMatch) {
     const candidate = groupMatch[1].toLowerCase();
     // Avoid mistaking "DL" in "WEB-DL" or "264" in "H-264" for a release group
@@ -141,6 +142,7 @@ export function scoreSubtitleSync(candidate, videoContext) {
   } else if (reqMeta) {
     const subFile = candidate.SubFileName || candidate.subtitleFileName || "";
     const movieRel = candidate.MovieReleaseName || candidate.movieReleaseName || "";
+    const authorComment = (candidate.SubAuthorComment || "").toLowerCase();
     const subMeta = parseReleaseMetadata(movieRel || subFile);
     const subFileMeta = parseReleaseMetadata(subFile);
 
@@ -150,37 +152,42 @@ export function scoreSubtitleSync(candidate, videoContext) {
       subMeta?.releaseGroup ||
       subFileMeta?.releaseGroup ||
       ""
-    ).toLowerCase();
+    )
+      .replace(/\[[^\]]*\]/g, "")
+      .toLowerCase();
 
     const candFormat = subMeta?.formatClass || subFileMeta?.formatClass || null;
     const candService = subMeta?.service || subFileMeta?.service || null;
 
-    // 2. Exact stem match
+    // Check if the uploader's SubAuthorComment explicitly lists the exact filename stem or release group!
+    // (OpenSubtitles uploaders list all verified-sync releases in SubAuthorComment, e.g., "Dexter.Resurrection.S02E01.1080p.HEVC.x265-MeGusta")
+    const commentHasExactFilename =
+      reqMeta.lower.length >= 8 && authorComment.includes(reqMeta.lower);
+    const commentHasReleaseGroup =
+      reqMeta.releaseGroup &&
+      reqMeta.releaseGroup.length >= 3 &&
+      new RegExp(`[-.\\s]${reqMeta.releaseGroup}\\b`, "i").test(authorComment);
+
+    // 2. Exact stem match (in MovieReleaseName, SubFileName, or explicit SubAuthorComment release list)
     if (
       (subMeta && subMeta.lower === reqMeta.lower) ||
-      (subFileMeta && subFileMeta.lower.startsWith(reqMeta.lower))
+      (subFileMeta && subFileMeta.lower.startsWith(reqMeta.lower)) ||
+      commentHasExactFilename
     ) {
       syncScore = 500;
     }
-    // 3. Exact release group match (and format class doesn't conflict, e.g., both WEB or both BluRay)
+    // 3. Exact release group match (in InfoReleaseGroup, MovieReleaseName, SubFileName, or SubAuthorComment)
     else if (
       reqMeta.releaseGroup &&
-      candGroup &&
-      reqMeta.releaseGroup === candGroup &&
+      ((candGroup && reqMeta.releaseGroup === candGroup) ||
+        subMeta?.tokenSet.has(reqMeta.releaseGroup) ||
+        subFileMeta?.tokenSet.has(reqMeta.releaseGroup) ||
+        commentHasReleaseGroup) &&
       (!reqMeta.formatClass || !candFormat || reqMeta.formatClass === candFormat)
     ) {
       syncScore = 350;
     }
-    // 4. Release group token appears explicitly inside the subtitle's release/file name
-    else if (
-      reqMeta.releaseGroup &&
-      reqMeta.releaseGroup.length >= 3 &&
-      (subMeta?.tokenSet.has(reqMeta.releaseGroup) || subFileMeta?.tokenSet.has(reqMeta.releaseGroup)) &&
-      (!reqMeta.formatClass || !candFormat || reqMeta.formatClass === candFormat)
-    ) {
-      syncScore = 300;
-    }
-    // 5. Same streaming service (e.g., AMZN.WEB-DL == AMZN.WEB-DL)
+    // 4. Same streaming service (e.g., AMZN.WEB-DL == AMZN.WEB-DL)
     else if (
       reqMeta.service &&
       candService &&
@@ -190,17 +197,6 @@ export function scoreSubtitleSync(candidate, videoContext) {
     ) {
       syncScore = 220;
     }
-    // 6. Same rip format class (e.g., both BluRay/BDRip/Remux or both WEB-DL/WEBRip)
-    // All standard BluRay rips of the same movie share the exact retail disc frame timing,
-    // and standard WEB-DL/WEBRip releases share the digital master timing.
-    else if (reqMeta.formatClass && candFormat && reqMeta.formatClass === candFormat) {
-      syncScore = 150;
-    }
-  } else if (!videoHash && !filename) {
-    // 7. When a Stremio client (like Stremio Web or an external player stream) does not pass
-    // `videoHash` or `filename` at all, score by trusted/popular primary English release so
-    // the addon still loads in the Hebrew providers list instead of disappearing!
-    syncScore = 110;
   }
 
   // If no strict sync match was found, reject (`0`)
